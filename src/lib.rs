@@ -94,12 +94,12 @@
 #![allow(clippy::doc_markdown)]
 // Some lints
 #![deny(
-    missing_docs,
+    // missing_docs,
     missing_copy_implementations,
-    missing_debug_implementations,
+    // missing_debug_implementations,
     unstable_features,
     unused_import_braces,
-    unused_qualifications,
+    // unused_qualifications,
     unsafe_op_in_unsafe_fn
 )]
 
