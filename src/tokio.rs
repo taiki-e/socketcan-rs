@@ -31,7 +31,7 @@ use crate::{
 };
 use futures::{prelude::*, ready, task::Context};
 use std::{
-    io::{Read, Write},
+    io::Write,
     os::unix::{
         io::{AsRawFd, OwnedFd},
         prelude::RawFd,
@@ -50,22 +50,19 @@ pub struct AsyncCanSocket<T: Socket>(AsyncFd<T>);
 impl<T: Socket + From<OwnedFd>> AsyncCanSocket<T> {
     /// Open a named CAN device such as "can0, "vcan0", etc
     pub fn open(ifname: &str) -> IoResult<Self> {
-        let sock = T::open(ifname)?;
-        sock.set_nonblocking(true)?;
+        let sock = T::_open(ifname, true)?;
         Ok(Self(AsyncFd::new(sock)?))
     }
 
     /// Open CAN device by kernel interface number
     pub fn open_if(ifindex: u32) -> IoResult<Self> {
-        let sock = T::open_iface(ifindex)?;
-        sock.set_nonblocking(true)?;
+        let sock = T::open_iface(ifindex, true)?;
         Ok(Self(AsyncFd::new(sock)?))
     }
 
     /// Open a CAN socket by address
     pub fn open_addr(addr: &CanAddr) -> IoResult<Self> {
-        let sock = T::open_addr(addr)?;
-        sock.set_nonblocking(true)?;
+        let sock = T::open_addr(addr, true)?;
         Ok(Self(AsyncFd::new(sock)?))
     }
 }
@@ -144,8 +141,10 @@ impl AsyncRead for CanSocket {
         loop {
             let mut guard = ready!(self.0.poll_read_ready_mut(cx))?;
 
-            let unfilled = buf.initialize_unfilled();
-            match guard.try_io(|inner| inner.get_mut().read(unfilled)) {
+            let unfilled = unsafe { buf.unfilled_mut() };
+            match guard
+                .try_io(|inner| Ok(rustix::io::read_uninit(inner.get_mut(), unfilled)?.0.len()))
+            {
                 Ok(Ok(len)) => {
                     buf.advance(len);
                     return Poll::Ready(Ok(()));
@@ -248,8 +247,10 @@ impl AsyncRead for CanFdSocket {
         loop {
             let mut guard = ready!(self.0.poll_read_ready_mut(cx))?;
 
-            let unfilled = buf.initialize_unfilled();
-            match guard.try_io(|inner| inner.get_mut().read(unfilled)) {
+            let unfilled = unsafe { buf.unfilled_mut() };
+            match guard
+                .try_io(|inner| Ok(rustix::io::read_uninit(inner.get_mut(), unfilled)?.0.len()))
+            {
                 Ok(Ok(len)) => {
                     buf.advance(len);
                     return Poll::Ready(Ok(()));
@@ -340,7 +341,7 @@ mod tests {
     /// Write a test frame to the CanSocket using the `tokio::io::AsyncWrite` trait
     async fn write_frame_with_async_write(socket: &mut CanSocket) -> Result<()> {
         let test_frame = CanFrame::new(StandardId::new(0x1).unwrap(), &[0]).unwrap();
-        socket.write(test_frame.as_bytes()).await?;
+        socket.write_all(test_frame.as_bytes()).await?;
         Ok(())
     }
 
@@ -380,7 +381,7 @@ mod tests {
     /// Write a test frame to the CanSocket using the `tokio::io::AsyncWrite` trait
     async fn write_frame_fd_with_async_write(socket: &mut CanFdSocket) -> Result<()> {
         let test_frame = CanFdFrame::new(StandardId::new(0x1).unwrap(), &[0]).unwrap();
-        socket.write(test_frame.as_bytes()).await?;
+        socket.write_all(test_frame.as_bytes()).await?;
         Ok(())
     }
 
@@ -515,9 +516,9 @@ mod tests {
             .fold(0u8, |acc, _frame| async move { acc + 1 });
 
         let send_frames = async {
-            let _frame_1 = sink.send(frame_id_1).await?;
-            let _frame_2 = sink.send(frame_id_2).await?;
-            let _frame_3 = sink.send(frame_id_3).await?;
+            let () = sink.send(frame_id_1).await?;
+            let () = sink.send(frame_id_2).await?;
+            let () = sink.send(frame_id_3).await?;
             println!("Sent 3 frames");
             Ok::<(), Error>(())
         };
@@ -555,9 +556,9 @@ mod tests {
             .fold(0u8, |acc, _frame| async move { acc + 1 });
 
         let send_frames = async {
-            let _frame_1 = sink.send(frame_id_1).await?;
-            let _frame_2 = sink.send(frame_id_2).await?;
-            let _frame_3 = sink.send(frame_id_3).await?;
+            let () = sink.send(frame_id_1).await?;
+            let () = sink.send(frame_id_2).await?;
+            let () = sink.send(frame_id_3).await?;
             println!("Sent 3 frames");
             Ok::<(), Error>(())
         };

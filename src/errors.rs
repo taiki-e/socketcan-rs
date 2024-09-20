@@ -39,7 +39,7 @@
 //!
 
 use crate::{CanErrorFrame, EmbeddedFrame, Frame};
-use std::{convert::TryFrom, error, fmt, io};
+use std::{error, fmt, io};
 use thiserror::Error;
 
 // ===== Composite Error for the crate =====

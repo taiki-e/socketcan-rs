@@ -12,16 +12,16 @@
 //! Implementation of sockets for CANbus 2.0 and FD for SocketCAN on Linux.
 
 use crate::{
-    as_bytes, as_bytes_mut,
-    frame::{can_frame_default, canfd_frame_default, AsPtr, CAN_ERR_MASK},
+    as_uninit_bytes, as_uninit_bytes_mut,
+    frame::{can_frame_uninit, canfd_frame_uninit, AsPtr, CAN_ERR_MASK},
     CanAddr, CanAnyFrame, CanFdFrame, CanFrame, CanRawFrame, IoError, IoErrorKind, IoResult,
 };
-use libc::{canid_t, socklen_t, AF_CAN, EINPROGRESS};
+use libc::{can_frame, canid_t, socklen_t, EINPROGRESS};
 use socket2::SockAddr;
 use std::{
     fmt,
-    io::{Read, Write},
-    mem::{size_of, size_of_val},
+    io::{self, Read, Write},
+    mem::{self, size_of, size_of_val, MaybeUninit},
     os::{
         raw::{c_int, c_void},
         unix::io::{AsFd, AsRawFd, BorrowedFd, IntoRawFd, OwnedFd, RawFd},
@@ -76,11 +76,20 @@ impl<E: fmt::Debug> ShouldRetry for IoResult<E> {
 // ===== Private local helper functions =====
 
 /// Tries to open the CAN socket by the interface number.
-fn raw_open_socket(addr: &CanAddr) -> IoResult<socket2::Socket> {
-    let af_can = socket2::Domain::from(AF_CAN);
-    let can_raw = socket2::Protocol::from(CAN_RAW);
-
-    let sock = socket2::Socket::new_raw(af_can, socket2::Type::RAW, Some(can_raw))?;
+fn raw_open_socket(addr: &CanAddr, nonblocking: bool) -> IoResult<socket2::Socket> {
+    let socket = rustix::net::socket_with(
+        rustix::net::AddressFamily::CAN,
+        rustix::net::SocketType::RAW,
+        if nonblocking {
+            rustix::net::SocketFlags::CLOEXEC | rustix::net::SocketFlags::NONBLOCK
+        } else {
+            rustix::net::SocketFlags::empty()
+        },
+        Some(rustix::net::Protocol::from_raw(
+            (CAN_RAW as u32).try_into().unwrap(),
+        )),
+    )?;
+    let sock = socket2::Socket::from(socket);
     sock.bind(&SockAddr::from(*addr))?;
     Ok(sock)
 }
@@ -157,7 +166,7 @@ pub fn set_socket_option_mult<T>(
 ///
 /// Note that a socket it created by opening it, and then closed by
 /// dropping it.
-pub trait Socket: AsRawFd {
+pub trait Socket: AsFd + AsRawFd {
     /// Open a named CAN device.
     ///
     /// Usually the more common case, opens a socket can device by name, such
@@ -166,41 +175,31 @@ pub trait Socket: AsRawFd {
     where
         Self: Sized,
     {
+        Self::_open(ifname, false)
+    }
+    fn _open(ifname: &str, nonblocking: bool) -> IoResult<Self>
+    where
+        Self: Sized,
+    {
         let addr = CanAddr::from_iface(ifname)?;
-        Self::open_addr(&addr)
+        Self::open_addr(&addr, nonblocking)
     }
 
     /// Open CAN device by interface number.
     ///
     /// Opens a CAN device by kernel interface number.
-    fn open_iface(ifindex: u32) -> IoResult<Self>
+    fn open_iface(ifindex: u32, nonblocking: bool) -> IoResult<Self>
     where
         Self: Sized,
     {
         let addr = CanAddr::new(ifindex);
-        Self::open_addr(&addr)
+        Self::open_addr(&addr, nonblocking)
     }
 
     /// Open a CAN socket by address.
-    fn open_addr(addr: &CanAddr) -> IoResult<Self>
+    fn open_addr(addr: &CanAddr, nonblocking: bool) -> IoResult<Self>
     where
         Self: Sized;
-
-    /// Gets a shared reference to the underlying socket object
-    fn as_raw_socket(&self) -> &socket2::Socket;
-
-    /// Gets a mutable reference to the underlying socket object
-    fn as_raw_socket_mut(&mut self) -> &mut socket2::Socket;
-
-    /// Determines if the socket is currently in nonblocking mode.
-    fn nonblocking(&self) -> IoResult<bool> {
-        self.as_raw_socket().nonblocking()
-    }
-
-    /// Change socket to non-blocking mode or back to blocking mode.
-    fn set_nonblocking(&self, nonblocking: bool) -> IoResult<()> {
-        self.as_raw_socket().set_nonblocking(nonblocking)
-    }
 
     /// The type of CAN frame that can be read and written by the socket.
     ///
@@ -210,7 +209,10 @@ pub trait Socket: AsRawFd {
 
     /// Gets the read timout on the socket, if any.
     fn read_timeout(&self) -> IoResult<Option<Duration>> {
-        self.as_raw_socket().read_timeout()
+        Ok(rustix::net::sockopt::get_socket_timeout(
+            self,
+            rustix::net::sockopt::Timeout::Recv,
+        )?)
     }
 
     /// Sets the read timeout on the socket
@@ -224,12 +226,19 @@ pub trait Socket: AsRawFd {
     where
         D: Into<Option<Duration>>,
     {
-        self.as_raw_socket().set_read_timeout(duration.into())
+        Ok(rustix::net::sockopt::set_socket_timeout(
+            self,
+            rustix::net::sockopt::Timeout::Recv,
+            duration.into(),
+        )?)
     }
 
     /// Gets the write timeout on the socket, if any.
     fn write_timeout(&self) -> IoResult<Option<Duration>> {
-        self.as_raw_socket().write_timeout()
+        Ok(rustix::net::sockopt::get_socket_timeout(
+            self,
+            rustix::net::sockopt::Timeout::Send,
+        )?)
     }
 
     /// Sets the write timeout on the socket
@@ -240,21 +249,45 @@ pub trait Socket: AsRawFd {
     where
         D: Into<Option<Duration>>,
     {
-        self.as_raw_socket().set_write_timeout(duration.into())
+        Ok(rustix::net::sockopt::set_socket_timeout(
+            self,
+            rustix::net::sockopt::Timeout::Send,
+            duration.into(),
+        )?)
     }
 
     /// Blocking read a single can frame.
     fn read_frame(&self) -> IoResult<Self::FrameType>;
 
     /// Blocking read a single can frame with timeout.
-    fn read_frame_timeout(&self, timeout: Duration) -> IoResult<Self::FrameType> {
-        use nix::poll::{poll, PollFd, PollFlags};
-        let pollfd = PollFd::new(self.as_raw_fd(), PollFlags::POLLIN);
+    fn read_frame_timeout(&self, timeout: Duration) -> IoResult<Self::FrameType>
+    where
+        Self: Sized,
+    {
+        use rustix::event::*;
+        let pollfd = PollFd::new(self, PollFlags::IN);
 
         match poll(&mut [pollfd], timeout.as_millis() as c_int)? {
             0 => Err(IoErrorKind::TimedOut.into()),
-            _ => self.read_frame(),
+            _ => {
+                // let now = std::time::Instant::now();
+                let res = self.read_frame();
+                // dbg!(now.elapsed());
+                res
+            }
         }
+        // let pollfd = epoll::create(epoll::CreateFlags::CLOEXEC);
+        // // ::new(self, PollFlags::IN);
+
+        // match poll(&mut [pollfd], timeout.as_millis() as c_int)? {
+        //     0 => Err(IoErrorKind::TimedOut.into()),
+        //     _ => {
+        //         let now = std::time::Instant::now();
+        //         let res = self.read_frame();
+        //         dbg!(now.elapsed());
+        //         res
+        //     }
+        // }
     }
 
     /// Write a single can frame.
@@ -323,7 +356,7 @@ pub trait SocketOptions: AsRawFd {
         }
     }
 
-    /// Sets a collection of multiple socke options with one call.
+    /// Sets a collection of multiple socket options with one call.
     fn set_socket_option_mult<T>(&self, level: c_int, name: c_int, values: &[T]) -> IoResult<()> {
         let ret = if values.is_empty() {
             // can't pass in a ptr to a 0-len slice, pass a null ptr instead
@@ -485,10 +518,28 @@ pub struct CanSocket(socket2::Socket);
 
 impl CanSocket {
     /// Reads a low-level libc `can_frame` from the socket.
-    pub fn read_raw_frame(&self) -> IoResult<libc::can_frame> {
-        let mut frame = can_frame_default();
-        self.as_raw_socket().read_exact(as_bytes_mut(&mut frame))?;
-        Ok(frame)
+    pub fn read_raw_frame(&self) -> IoResult<can_frame> {
+        let mut frame = can_frame_uninit();
+        read_uninit_exact(&self.0, as_uninit_bytes_mut(&mut frame))?;
+        Ok(unsafe { frame.assume_init() })
+    }
+}
+
+pub(crate) fn read_uninit_exact(fd: &impl AsFd, mut buf: &mut [MaybeUninit<u8>]) -> IoResult<()> {
+    loop {
+        match rustix::io::read_uninit(fd, mem::take(&mut buf)) {
+            Ok((init, remaining)) => {
+                if remaining.is_empty() {
+                    return Ok(());
+                }
+                if init.is_empty() {
+                    return Err(io::ErrorKind::UnexpectedEof.into());
+                }
+                buf = remaining;
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.into()),
+        }
     }
 }
 
@@ -497,19 +548,9 @@ impl Socket for CanSocket {
     type FrameType = CanFrame;
 
     /// Opens the socket by interface index.
-    fn open_addr(addr: &CanAddr) -> IoResult<Self> {
-        let sock = raw_open_socket(addr)?;
+    fn open_addr(addr: &CanAddr, nonblocking: bool) -> IoResult<Self> {
+        let sock = raw_open_socket(addr, nonblocking)?;
         Ok(Self(sock))
-    }
-
-    /// Gets a shared reference to the underlying socket object
-    fn as_raw_socket(&self) -> &socket2::Socket {
-        &self.0
-    }
-
-    /// Gets a mutable reference to the underlying socket object
-    fn as_raw_socket_mut(&mut self) -> &mut socket2::Socket {
-        &mut self.0
     }
 
     /// Writes a normal CAN 2.0 frame to the socket.
@@ -517,7 +558,7 @@ impl Socket for CanSocket {
     where
         F: Into<CanFrame> + AsPtr,
     {
-        self.as_raw_socket().write_all(frame.as_bytes())
+        (&self.0).write_all(frame.as_bytes())
     }
 
     /// Reads a normal CAN 2.0 frame from the socket.
@@ -531,6 +572,7 @@ impl SocketOptions for CanSocket {}
 
 // Has no effect: #[deprecated(since = "3.1", note = "Use AsFd::as_fd() instead.")]
 impl AsRawFd for CanSocket {
+    #[inline]
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
     }
@@ -549,24 +591,27 @@ impl IntoRawFd for CanSocket {
 }
 
 impl AsFd for CanSocket {
+    #[inline]
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.0.as_fd()
     }
 }
 
 impl Read for CanSocket {
+    #[inline]
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        self.0.read(buf)
+        Ok(rustix::io::read(&self.0, buf)?)
     }
 }
 
 impl Write for CanSocket {
+    #[inline]
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-        self.0.write(buf)
+        Ok(rustix::io::write(&self.0, buf)?)
     }
-
+    #[inline]
     fn flush(&mut self) -> IoResult<()> {
-        self.0.flush()
+        Ok(())
     }
 }
 
@@ -606,18 +651,22 @@ impl CanFdSocket {
     /// This might be either type of CAN frame, a classic CAN 2.0 frame
     /// or an FD frame.
     pub fn read_raw_frame(&self) -> IoResult<CanRawFrame> {
-        let mut fdframe = canfd_frame_default();
+        let mut fdframe = canfd_frame_uninit();
 
-        match self.as_raw_socket().read(as_bytes_mut(&mut fdframe))? {
+        match rustix::io::read_uninit(&self.0, as_uninit_bytes_mut(&mut fdframe))?
+            .0
+            .len()
+        {
             // If we only get 'can_frame' number of bytes, then the return is,
             // by definition, a can_frame, so we just copy the bytes into the
             // proper type.
             CAN_MTU => {
-                let mut frame = can_frame_default();
-                as_bytes_mut(&mut frame)[..CAN_MTU].copy_from_slice(&as_bytes(&fdframe)[..CAN_MTU]);
-                Ok(frame.into())
+                let mut frame = can_frame_uninit();
+                as_uninit_bytes_mut(&mut frame)
+                    .copy_from_slice(&as_uninit_bytes(&fdframe)[..CAN_MTU]);
+                Ok(unsafe { frame.assume_init().into() })
             }
-            CANFD_MTU => Ok(fdframe.into()),
+            CANFD_MTU => Ok(unsafe { fdframe.assume_init().into() }),
             _ => Err(IoError::last_os_error()),
         }
     }
@@ -628,20 +677,10 @@ impl Socket for CanFdSocket {
     type FrameType = CanAnyFrame;
 
     /// Opens the FD socket by interface index.
-    fn open_addr(addr: &CanAddr) -> IoResult<Self> {
-        raw_open_socket(addr)
+    fn open_addr(addr: &CanAddr, nonblocking: bool) -> IoResult<Self> {
+        raw_open_socket(addr, nonblocking)
             .and_then(|sock| Self::set_fd_mode(sock, true))
             .map(Self)
-    }
-
-    /// Gets a shared reference to the underlying socket object
-    fn as_raw_socket(&self) -> &socket2::Socket {
-        &self.0
-    }
-
-    /// Gets a mutable reference to the underlying socket object
-    fn as_raw_socket_mut(&mut self) -> &mut socket2::Socket {
-        &mut self.0
     }
 
     /// Writes any type of CAN frame to the socket.
@@ -649,23 +688,27 @@ impl Socket for CanFdSocket {
     where
         F: Into<Self::FrameType> + AsPtr,
     {
-        self.as_raw_socket().write_all(frame.as_bytes())
+        (&self.0).write_all(frame.as_bytes())
     }
 
     /// Reads either type of CAN frame from the socket.
     fn read_frame(&self) -> IoResult<CanAnyFrame> {
-        let mut fdframe = canfd_frame_default();
+        let mut fdframe = canfd_frame_uninit();
 
-        match self.as_raw_socket().read(as_bytes_mut(&mut fdframe))? {
+        match rustix::io::read_uninit(&self.0, as_uninit_bytes_mut(&mut fdframe))?
+            .0
+            .len()
+        {
             // If we only get 'can_frame' number of bytes, then the return is,
             // by definition, a can_frame, so we just copy the bytes into the
             // proper type.
             CAN_MTU => {
-                let mut frame = can_frame_default();
-                as_bytes_mut(&mut frame)[..CAN_MTU].copy_from_slice(&as_bytes(&fdframe)[..CAN_MTU]);
-                Ok(CanFrame::from(frame).into())
+                let mut frame = can_frame_uninit();
+                as_uninit_bytes_mut(&mut frame)
+                    .copy_from_slice(&as_uninit_bytes(&fdframe)[..CAN_MTU]);
+                Ok(CanFrame::from(unsafe { frame.assume_init() }).into())
             }
-            CANFD_MTU => Ok(CanFdFrame::from(fdframe).into()),
+            CANFD_MTU => Ok(CanFdFrame::from(unsafe { fdframe.assume_init() }).into()),
             _ => Err(IoError::last_os_error()),
         }
     }

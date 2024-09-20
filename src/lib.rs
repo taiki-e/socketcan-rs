@@ -92,6 +92,7 @@
 
 // clippy: do not warn about things like "SocketCAN" inside the docs
 #![allow(clippy::doc_markdown)]
+#![allow(clippy::bool_assert_comparison, clippy::let_and_return)]
 // Some lints
 #![deny(
     // missing_docs,
@@ -103,7 +104,10 @@
     unsafe_op_in_unsafe_fn
 )]
 
-use std::{io::ErrorKind, mem::size_of};
+use std::{
+    io::ErrorKind,
+    mem::{size_of, MaybeUninit},
+};
 
 // Re-export the embedded_can crate so that applications can rely on
 // finding the same version we use.
@@ -174,11 +178,19 @@ pub(crate) fn as_bytes<T: Sized>(val: &T) -> &[u8] {
     let sz = size_of::<T>();
     unsafe { std::slice::from_raw_parts::<'_, u8>(val as *const _ as *const u8, sz) }
 }
+pub(crate) fn as_uninit_bytes<T: Sized>(val: &MaybeUninit<T>) -> &[MaybeUninit<u8>] {
+    let sz = size_of::<T>();
+    unsafe { std::slice::from_raw_parts(val as *const _ as *const MaybeUninit<u8>, sz) }
+}
 
 /// Gets a mutable byte slice for any sized variable.
 pub(crate) fn as_bytes_mut<T: Sized>(val: &mut T) -> &mut [u8] {
     let sz = size_of::<T>();
     unsafe { std::slice::from_raw_parts_mut(val as *mut _ as *mut u8, sz) }
+}
+pub(crate) fn as_uninit_bytes_mut<T: Sized>(val: &mut MaybeUninit<T>) -> &mut [MaybeUninit<u8>] {
+    let sz = size_of::<T>();
+    unsafe { std::slice::from_raw_parts_mut(val as *mut _ as *mut MaybeUninit<u8>, sz) }
 }
 
 // ===== embedded_can I/O traits =====

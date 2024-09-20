@@ -38,7 +38,9 @@ impl CanSocket {
     /// Usually the more common case, opens a socket can device by name, such
     /// as "can0", "vcan0", or "socan0".
     pub fn open(ifname: &str) -> io::Result<Self> {
-        crate::CanSocket::open(ifname)?.try_into()
+        Ok(Self(Async::new_nonblocking(crate::CanSocket::_open(
+            ifname, true,
+        )?)?))
     }
 
     /// Writes a frame to the socket asynchronously.
@@ -83,7 +85,9 @@ impl CanFdSocket {
     /// Usually the more common case, opens a socket can device by name, such
     /// as "can0", "vcan0", or "socan0".
     pub fn open(ifname: &str) -> io::Result<Self> {
-        crate::CanFdSocket::open(ifname)?.try_into()
+        Ok(Self(Async::new_nonblocking(crate::CanFdSocket::_open(
+            ifname, true,
+        )?)?))
     }
 
     /// Writes a frame to the socket asynchronously.

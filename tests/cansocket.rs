@@ -74,7 +74,7 @@ fn vcan_test_nonblocking() {
     let sock = CanSocket::open(VCAN).unwrap();
     // Filter out _any_ traffic
     sock.set_filter_drop_all().unwrap();
-    sock.set_nonblocking(true).unwrap();
+    socket2::SockRef::from(&sock).set_nonblocking(true).unwrap();
 
     // no timeout set, but should return immediately
     assert!(sock.read_frame().should_retry());

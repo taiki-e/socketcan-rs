@@ -20,11 +20,8 @@ use std::env;
 fn main() -> anyhow::Result<()> {
     let iface = env::args().nth(1).unwrap_or_else(|| "vcan0".into());
 
-    let mut sock = CanSocket::open(&iface)
+    let mut sock = CanSocket::_open(&iface, true)
         .with_context(|| format!("Failed to open socket on interface {}", iface))?;
-
-    sock.set_nonblocking(true)
-        .context("Failed to make socket non-blocking")?;
 
     let frame = block!(sock.receive()).context("Receiving frame")?;
 

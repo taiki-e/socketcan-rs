@@ -37,8 +37,8 @@ use itertools::Itertools;
 use libc::{can_frame, canfd_frame, canid_t};
 use std::{
     ffi::c_void,
-    mem::size_of,
-    {convert::TryFrom, fmt, matches, mem},
+    fmt,
+    mem::{self, size_of, MaybeUninit},
 };
 
 pub use libc::{
@@ -108,13 +108,32 @@ pub fn id_from_raw(id: u32) -> Option<Id> {
 pub fn can_frame_default() -> can_frame {
     unsafe { mem::zeroed() }
 }
+#[inline(always)]
+pub(crate) fn can_frame_uninit() -> MaybeUninit<can_frame> {
+    MaybeUninit::uninit()
+}
 
-/// Creates a default C `can_frame`.
+/// Creates a default C `canfd_frame`.
 /// This initializes the entire structure to zeros.
 #[inline(always)]
 pub fn canfd_frame_default() -> canfd_frame {
     unsafe { mem::zeroed() }
 }
+#[inline(always)]
+pub(crate) fn canfd_frame_uninit() -> MaybeUninit<canfd_frame> {
+    MaybeUninit::uninit()
+}
+
+// /// Creates a default C `canxl_frame`.
+// /// This initializes the entire structure to zeros.
+// #[inline(always)]
+// pub fn canxl_frame_default() -> canxl_frame {
+//     unsafe { mem::zeroed() }
+// }
+// #[inline(always)]
+// pub(crate) fn canxl_frame_uninit() -> MaybeUninit<canxl_frame> {
+//     MaybeUninit::uninit()
+// }
 
 // ===== AsPtr trait =====
 
@@ -792,7 +811,7 @@ impl EmbeddedFrame for CanRemoteFrame {
     /// A slice into the actual data. Slice will always be <= 8 bytes in length
     fn data(&self) -> &[u8] {
         // TODO: Is this OK, or just an empty slice?
-        &self.0.data[..self.dlc()]
+        unsafe { mem::transmute(&self.0.data[..self.dlc()]) }
     }
 }
 
@@ -979,7 +998,7 @@ impl EmbeddedFrame for CanErrorFrame {
     /// A slice into the actual data.
     /// An error frame can always acess the full 8-byte data payload.
     fn data(&self) -> &[u8] {
-        &self.0.data[..]
+        unsafe { mem::transmute(&self.0.data[..]) }
     }
 }
 
@@ -1194,7 +1213,7 @@ impl EmbeddedFrame for CanFdFrame {
     ///
     /// For normal CAN frames the slice will always be <= 8 bytes in length.
     fn data(&self) -> &[u8] {
-        &self.0.data[..(self.0.len as usize)]
+        unsafe { mem::transmute(&self.0.data[..(self.0.len as usize)]) }
     }
 }
 
@@ -1494,7 +1513,7 @@ mod tests {
                 assert_eq!(location, errors::Location::Id0400);
             }
             _ => {
-                assert!(false);
+                panic!()
             }
         }
     }

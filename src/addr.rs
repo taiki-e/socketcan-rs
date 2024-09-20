@@ -144,7 +144,7 @@ mod tests {
     fn test_addr_to_sock_addr() {
         let addr = CanAddr::new(IDX);
 
-        let (sock_addr, len) = addr.clone().into_storage();
+        let (sock_addr, len) = addr.into_storage();
 
         assert_eq!(CanAddr::len() as socklen_t, len);
         assert_eq!(as_bytes(&addr), &as_bytes(&sock_addr)[0..len as usize]);
